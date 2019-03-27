@@ -1,6 +1,6 @@
 # Cell type specific analyses
 
-This repository contains an RMarkdown document including a "complete" version with full R code to perform to identify disease-relevant Substantia nigra cell types across 33 diseases and traits with LDSCORE
+This repository contains an RMarkdown document including a "complete" version with full R code to perform to identify disease-relevant Substantia nigra (SN) cell types across 33 diseases and traits with LDSCORE
 
 ## Material
 
