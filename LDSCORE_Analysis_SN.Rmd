@@ -1,0 +1,244 @@
+---
+title: "LDSCORE Analysis Substantia Nigra Atlas"
+author: "Cynthia Sandor"
+date: 'Last update: `r date()`'
+output:
+  html_document:
+    fig_height: 5
+    fig_width: 5
+    theme: cerulean
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+      toc_depth: 5
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+
+
+```{r clean r session, include=FALSE}
+rm(list = ls())
+```
+
+We used stratified LD score regression (PMID:9632380) to partition heritability from GWAS summary statistics to sets of specifically expressed genes and to identify disease-relevant SN and Cortex cell types across 33 diseases and traits. 
+
+
+## Define the cell-specific gene set
+
+To define the cell-specific gene set from TPM expression matrix and brain cell type identified, we used the same approach than Finucane et al. 2018. (PMID:9632380), which consists to compute a t-statistic for specific expression of a given cell population and to define the cell-type gene set by using the 10% of genes with the highest t-statistic. 
+
+### Load data
+
+```{r get gene expression matrix and info cell,echo=TRUE}
+load("Devika_midbrain.Rdata")
+list_gene<-row.names(matrix_expr)
+list_cell<-names(table(info_cell[,8]) )
+print(list_cell)
+```
+
+### Generate t test statistic for 10 first gene
+
+```{r function to compute t test function,echo=TRUE}
+compute_t_val<-function(gene_ref,cell_ref,matrix_expr,info_cell) {
+  n_cell<-dim(matrix_expr)[2]
+  X<- matrix(-1, nrow = n_cell, ncol = 1)
+  X[which(info_cell$level1class==cell_ref),1]<-1
+  Y<-t(matrix_expr[row.names(matrix_expr)==gene_ref,])
+  df<-data.frame(y=Y,x=X)
+  colnames(df)<-c("y","x")
+  linearMod <- lm(y ~ x, data=df)
+  val<-summary(linearMod)
+  list_val<-val$coefficients[2,1]
+  return(val$coefficients[2,1]) ## t-statisc value
+}
+```
+
+```{r compute t test for 10sth gene,echo=TRUE}
+for (i in c(1:length(list_cell))) {
+  cell_ref=list_cell[i]
+  list_t_stat<-sapply(list_gene[c(1:10)],compute_t_val,cell_ref=list_cell[i],matrix_expr=matrix_expr,info_cell=info_cell)
+  if (i==1) {
+    df_t_test<-data.frame(list_t_stat)
+  } else {
+    df_t_test<-cbind(df_t_test,list_t_stat)
+  }
+}
+colnames(df_t_test)<-list_cell
+```
+
+### Load previous results
+
+As to compute the full matrix take time we can load the t-statistic results generated for each gene for different cell type in the SN
+
+
+```{r get t test results,echo=TRUE}
+load("Mid_t_test.Rdata")
+dim(df_t_test)
+list_gene<-as.character(row.names(df_t_test))
+```
+
+### Get ensembl id to gene symbol
+
+```{r convert ensemble id to gene symbol,echo=TRUE}
+library(biomaRt)
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+query_ensembl<-getBM(attributes=c('ensembl_gene_id','hgnc_symbol'), filters ='hgnc_symbol', values =list_gene, mart = ensembl)
+colnames(query_ensembl)[1]<-"GENE"
+df_t_test$hgnc_symbol<-rownames(df_t_test)
+df_t_test<-merge(df_t_test,query_ensembl,by=c("hgnc_symbol"))
+```
+
+### Get List of genes
+
+```{r get list of genes,echo=TRUE}
+library(reshape2)
+
+df_t_test_s<-melt(df_t_test[,-c(1)],by=c("GENE"))
+colnames(df_t_test_s)<-c("GENE","Cell","T")
+
+list_cell<-unique(as.character(df_t_test_s$Cell))
+list_gene<-unique(as.character(df_t_test_s$GENE))
+
+fraction<-0.1 ## Top 10% of gene
+nb_gene_select<-as.integer(fraction* length(list_gene)) 
+
+df_t_test_s_ord<-df_t_test_s[order(-df_t_test_s$T),] ## order by T statistic
+dir_set<-"Midbrain_GeneSet"
+system(paste("mkdir ",dir_set,sep=""))
+
+for (i in c(1:length(list_cell))) {
+  print (list_cell[i])
+  # gene set
+  list_m<-df_t_test_s_ord$GENE[df_t_test_s_ord$Cell==list_cell[i]]
+  list_m<-list_m[(1:nb_gene_select)]
+  f_out=paste(dir_set,"/Devika_",list_cell[i],".GeneSet",sep='')
+  write.table(data.frame(list_m),file=f_out,quote=FALSE,row.names=FALSE,col.names=FALSE,sep="\t")
+  
+  # control set
+  index_remove<-which(list_gene %in%  list_m)
+  list_control<-list_gene[-index_remove]
+  f_out=paste(dir_set,"/Devika_control_",list_cell[i],".GeneSet",sep='')
+  write.table(data.frame(list_control),file=f_out,quote=FALSE,row.names=FALSE,col.names=FALSE,sep="\t")
+}
+```
+
+## Calculate of partitioned LD Scores
+
+We calculate partitioned LD Scores. See documentation of LSCORE: https://github.com/bulik/ldsc/wiki/LD-Score-Estimation-Tutorial
+
+### Create output directory
+
+```{r create an output directory for LDSCORE file,echo=TRUE}
+dataset<-"MidBrain"
+distance<-25
+dir_ldscore=paste(dataset,"_1000Gv3_",distance,"k_ldscores",sep="")
+system(paste("mkdir ",dir_ldscore,sep=""))
+```
+
+### Generate LDSCORE file by chromosome
+
+```{r set up parameter to run LSCORE,echo=TRUE}
+python<-"/apps/well/python/2.7.11/bin/python"
+system("export PATH=/apps/well/bedtools/2.27.0/bin/:$PATH")
+annot_ldscore<-"/apps/well/ldsc/20180517/make_annot.py"
+ldscore_script<-"/apps/well/ldsc/20180517/ldsc.py"
+dir_1000G<-"/well/webber/users/cynthias/CW027_TISSUE_SPECIFITY/data/1000G_EUR_Phase3_plink/"
+dir_hapmap<-"/well/webber/users/cynthias/CW027_TISSUE_SPECIFITY/data/hapmap3_snps/"
+gene_coord_file<-"ENSG_coord.txt"
+windows_size<-1000*25
+system("export PATH=/apps/well/bedtools/2.27.0/bin/:$PATH")
+```
+
+```{r generate ldscore file by chromosome,echo=TRUE}
+
+for (chromosome in c(1:22)) {
+  print("chromosome")
+  print(chromosome)
+  for (id_cell in c(1:length(list_cell))) {
+  
+    cell<-list_cell[id_cell]
+    print("Cell")
+    print (cell)
+    
+    ## Geneset
+    gene_set<-paste(dir_set,"/Devika_",cell,".GeneSet",sep='')
+    file_annot<-paste(dir_ldscore,"/Devika_",id_cell,"_",chromosome,".annot.gz",sep="")
+    command<-paste(python," ",annot_ldscore,"  --gene-set-file ",gene_set," --gene-coord-file ",gene_coord_file," --windowsize ",windows_size," --bimfile ",dir_1000G,"1000G.EUR.QC.",chromosome,".bim --annot-file ",file_annot,sep="")
+    system(command)
+    file_ldscore<-paste(dir_ldscore,"/Devika.",id_cell,".",chromosome,sep="")
+    command<-paste(python," ",ldscore_script," --l2 --bfile ",dir_1000G,"1000G.EUR.QC.",chromosome," --ld-wind-cm 1 --annot ", file_annot," --thin-annot --out ",file_ldscore,"  --print-snps ",dir_hapmap,"hm.",chromosome,".snp",sep="")
+    system(command)
+    system(paste("rm ",file_annot,sep=""))
+    
+  ## Geneset control
+  gene_set<-paste(dir_set,"/Devika_control_",cell,".GeneSet",sep='')
+  file_annot<-paste(dir_ldscore,"/Devika_control",id_cell,"_",chromosome,".annot.gz",sep="")
+  command<-paste(python," ",annot_ldscore,"  --gene-set-file ",gene_set," --gene-coord-file ",gene_coord_file," --windowsize ",windows_size," --bimfile ",dir_1000G,"1000G.EUR.QC.",chromosome,".bim --annot-file ",file_annot,sep="")
+  system(command)
+  file_ldscore<-paste(dir_ldscore,"/Devika.control.",id_cell,".",chromosome,sep="")
+  command<-paste(python," ",ldscore_script," --l2 --bfile ",dir_1000G,"1000G.EUR.QC.",chromosome," --ld-wind-cm 1 --annot ", file_annot," --thin-annot --out ",file_ldscore,"  --print-snps ",dir_hapmap,"hm.",chromosome,".snp",sep="")
+  system(command)
+  system(paste("rm ",file_annot,sep=""))
+}
+}
+
+```
+
+## Cell Type analysis
+
+### Generate the ldcts Generate the ldcts file
+
+
+```{r generate a file ldcts,echo=TRUE}
+f_ldcts<-paste("Devika_MidBrain_",distance,"k_1000Gv3.ldcts",sep="")
+list_info<-c()
+for (id_cell in c(1:length(list_cell))) {
+    cell<-list_cell[id_cell]
+    file_ldscore1<-paste(dir_ldscore,"/Devika.",id_cell,".",sep="")
+    file_ldscore2<-paste(dir_ldscore,"/Devika.control.",id_cell,".",sep="")
+    line<-paste(cell,"\t",file_ldscore1,",",file_ldscore2,sep="")
+    list_info<-c(list_info,line)
+}
+ write.table(data.frame(list_info),file=f_ldcts,quote=FALSE,row.names=FALSE,col.names=FALSE,sep="\t")
+```
+
+
+### Run LDSC cell type analysis
+
+
+```{r create a directory,echo=TRUE}
+dir_ldscore_results=paste(dataset,"LDSCORE_Cell_Type_",distance,"k_ldscores",sep="")
+system(paste("mkdir ",dir_ldscore_results,sep=""))
+
+```
+
+
+
+```{r set up parameter to run LSCORE,echo=TRUE}
+python<-"/apps/well/python/2.7.11/bin/python"
+system("export PATH=/apps/well/bedtools/2.27.0/bin/:$PATH")
+
+ldscore_script<-"/apps/well/ldsc/20180517/ldsc.py"
+dir_baseline<-"/well/webber/users/cynthias/CW027_TISSUE_SPECIFITY/src/step3_ldscore/1000G_EUR_Phase3_baseline/baseline. "
+dir_weights<-" /well/webber/users/cynthias/CW027_TISSUE_SPECIFITY/src/step3_ldscore/weights_hm3_no_hla/weights."
+```
+
+```{r run ldscore,echo=TRUE}
+dir_gwa="/well/webber/users/cynthias/CW027_TISSUE_SPECIFITY/src/step5_ldscore_format_gwa/"
+list_file<-list.files(path = dir_gwa,pattern=".sumstats.gz")
+
+
+for (i in c(1:length(list_file))) {
+  val<-".sumstats.gz"
+  name<-gsub(val,"",list_file[i])
+  name<-paste(name,"_",dataset,"_",distance,sep="")
+  command<-paste(python," ",ldscore_script," --h2-cts ",dir_gwa,list_file[i]," --ref-ld-chr ",dir_baseline," --out ",dir_ldscore_results,"/",name," --ref-ld-chr-cts ",f_ldcts," --w-ld-chr ",dir_weights,sep="")
+ system(command )
+}
+
+
+```
