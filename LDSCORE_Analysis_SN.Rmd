@@ -52,8 +52,8 @@ compute_t_val<-function(gene_ref,cell_ref,matrix_expr,info_cell) {
   colnames(df)<-c("y","x")
   linearMod <- lm(y ~ x, data=df)
   val<-summary(linearMod)
-  list_val<-val$coefficients[2,1]
-  return(val$coefficients[2,1]) ## t-statisc value
+  list_val<-val$coefficients[4,1]
+  return(val$coefficients[4,1]) ## t-statisc value
 }
 ```
 
